@@ -1,0 +1,5 @@
+flask
+stripe
+pymongo
+motor
+pytz
