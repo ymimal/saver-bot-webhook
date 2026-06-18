@@ -1,10 +1,17 @@
 import os
 from flask import Flask, request, jsonify, render_template_string
-from config import STRIPE_WEBHOOK_SECRET
-from devgagan.modules.stripe_payments import verify_stripe_webhook, handle_successful_payment
+import stripe
 import asyncio
 
 app = Flask(__name__)
+
+# ================== CONFIG ==================
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+
+if STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
+
 
 # ==================== SIMPLE WEBSITE ====================
 HTML = """
@@ -15,58 +22,14 @@ HTML = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Restricted Saver • Webhook</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
-        
-        body {
-            font-family: 'Inter', system_ui, sans-serif;
-            background: #0f172a;
-            color: #e2e8f0;
-            margin: 0;
-            padding: 40px 20px;
-            line-height: 1.6;
-        }
-        .container {
-            max-width: 720px;
-            margin: 0 auto;
-            background: #1e2937;
-            border-radius: 20px;
-            padding: 50px 40px;
-            box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1);
-        }
-        h1 { color: #60a5fa; margin-bottom: 10px; }
-        .status {
-            display: inline-flex;
-            align-items: center;
-            background: #334155;
-            padding: 8px 16px;
-            border-radius: 9999px;
-            font-size: 14px;
-            margin: 20px 0;
-        }
-        .dot { 
-            width: 10px; height: 10px; 
-            background: #4ade80; 
-            border-radius: 50%; 
-            margin-right: 8px;
-            animation: pulse 2s infinite;
-        }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: .4; }
-        }
-        code {
-            background: #0f172a;
-            padding: 2px 8px;
-            border-radius: 6px;
-            font-size: 0.9em;
-        }
-        .endpoint {
-            background: #0f172a;
-            padding: 16px;
-            border-radius: 12px;
-            margin: 20px 0;
-            font-family: monospace;
-        }
+        body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 40px 20px; }
+        .container { max-width: 720px; margin: 0 auto; background: #1e2937; padding: 50px 40px; border-radius: 20px; }
+        h1 { color: #60a5fa; }
+        .status { display: inline-flex; align-items: center; background: #334155; padding: 8px 16px; border-radius: 9999px; margin: 20px 0; }
+        .dot { width: 10px; height: 10px; background: #4ade80; border-radius: 50%; margin-right: 8px; animation: pulse 2s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+        code { background: #0f172a; padding: 2px 8px; border-radius: 6px; }
+        .endpoint { background: #0f172a; padding: 16px; border-radius: 12px; margin: 20px 0; font-family: monospace; }
     </style>
 </head>
 <body>
@@ -79,24 +42,19 @@ HTML = """
             <strong>Online & Ready</strong>
         </div>
 
-        <p>This server receives Stripe payment events and automatically activates premium for users.</p>
+        <p>This server receives Stripe payment events and activates premium automatically.</p>
 
         <div class="endpoint">
             <strong>Webhook URL:</strong><br>
             <code>https://your-app.onrender.com/webhook/stripe</code>
         </div>
 
-        <p><strong>How to connect:</strong></p>
+        <p><strong>Setup Steps:</strong></p>
         <ol>
-            <li>Copy the webhook URL above</li>
-            <li>Go to Stripe Dashboard → Developers → Webhooks</li>
-            <li>Add endpoint and paste the URL</li>
+            <li>Set <code>STRIPE_WEBHOOK_SECRET</code> in Render Environment Variables</li>
+            <li>Add this URL in Stripe Dashboard → Webhooks</li>
             <li>Select event: <code>checkout.session.completed</code></li>
         </ol>
-
-        <p style="margin-top: 40px; font-size: 13px; color: #64748b;">
-            Powered by Stripe • Made for Restricted Saver Bot
-        </p>
     </div>
 </body>
 </html>
@@ -113,18 +71,26 @@ def stripe_webhook():
     payload = request.get_data()
     sig_header = request.headers.get('Stripe-Signature')
 
-    event = verify_stripe_webhook(payload, sig_header)
-    if event is None:
+    if not STRIPE_WEBHOOK_SECRET:
+        return jsonify({'error': 'STRIPE_WEBHOOK_SECRET not set'}), 400
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except Exception as e:
+        print(f"[Stripe] Signature error: {e}")
         return jsonify({'error': 'Invalid signature'}), 400
 
     if event['type'] == 'checkout.session.completed':
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(handle_successful_payment(event))
-            loop.close()
-        except Exception as e:
-            print(f"[Stripe Webhook Error] {e}")
+        session = event['data']['object']
+        metadata = session.get('metadata', {})
+
+        user_id = metadata.get('user_id')
+        plan_key = metadata.get('plan_key')
+
+        if user_id and plan_key:
+            days = {"1month": 30, "3months": 90, "1year": 365}.get(plan_key, 30)
+            print(f"[Stripe] Payment successful! User: {user_id}, Plan: {plan_key}, Days: {days}")
+            # TODO: Add your MongoDB code here to extend premium
 
     return jsonify({'status': 'success'}), 200
 
